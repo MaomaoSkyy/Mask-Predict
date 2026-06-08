@@ -1,5 +1,7 @@
 from pathlib import Path
-from typing import Tuple
+from typing import Dict, List, Sequence, Tuple
+import bisect
+import hashlib
 
 import numpy as np
 import torch
@@ -104,6 +106,25 @@ def load_smd_entity(root: str, entity: str) -> Tuple[np.ndarray, np.ndarray, np.
     return train, test, label
 
 
+def get_entities(cfg) -> List[str]:
+    entities = getattr(cfg.data, "entities", None)
+    if entities is None:
+        return [cfg.data.entity]
+    if isinstance(entities, str):
+        entities = [e.strip() for e in entities.split(",") if e.strip()]
+    entities = list(entities)
+    return entities if entities else [cfg.data.entity]
+
+
+def entity_group_name(entities: Sequence[str]) -> str:
+    entities = list(entities)
+    if len(entities) == 1:
+        return entities[0]
+    joined = ",".join(entities)
+    suffix = hashlib.sha1(joined.encode("utf-8")).hexdigest()[:8]
+    return f"concat_{len(entities)}_{suffix}"
+
+
 class SlidingWindow(Dataset):
     """从一段连续时间序列上滑窗。
     返回 tensor shape: (T, D), float32。
@@ -124,22 +145,36 @@ class SlidingWindow(Dataset):
         return self.series[s:s + self.window]
 
 
-def build_smd_datasets(cfg) -> Tuple[SlidingWindow, SlidingWindow, SlidingWindow, np.ndarray, MinMaxScaler]:
-    """返回 (train_ds, val_ds, test_ds, test_label, scaler)。
-    val 从训练集尾部切，避免泄露未来；scaler 仅在训练数据上拟合。
-    """
-    train_raw, test_raw, label = load_smd_entity(cfg.data.root, cfg.data.entity)
+class MultiEntitySlidingWindow(Dataset):
+    """多实体拼接滑窗，保持每个实体内部时序顺序。"""
 
+    def __init__(self, series_list: Sequence[np.ndarray], entities: Sequence[str], window: int, stride: int = 1):
+        assert len(series_list) == len(entities), "series_list 与 entities 长度必须一致"
+        self.entities = list(entities)
+        self.datasets = [SlidingWindow(series, window=window, stride=stride) for series in series_list]
+        self._cum_sizes: List[int] = []
+        total = 0
+        sample_entity_ids = []
+        for i, ds in enumerate(self.datasets):
+            total += len(ds)
+            self._cum_sizes.append(total)
+            sample_entity_ids.extend([i] * len(ds))
+        self.sample_entity_ids = np.asarray(sample_entity_ids, dtype=np.int64)
+
+    def __len__(self) -> int:
+        return self._cum_sizes[-1] if self._cum_sizes else 0
+
+    def __getitem__(self, i: int) -> torch.Tensor:
+        ds_idx = bisect.bisect_right(self._cum_sizes, i)
+        start = 0 if ds_idx == 0 else self._cum_sizes[ds_idx - 1]
+        return self.datasets[ds_idx][i - start]
+
+
+def _normalize_entity(train_raw: np.ndarray, test_raw: np.ndarray, cfg):
     n_train_all = train_raw.shape[0]
-    # Sentinel 前向填充（仅训练数据；test 保留原值用于异常检测）
     sentinel_thr = float(getattr(cfg.data, "sentinel_threshold", 1e6))
     if sentinel_thr > 0:
-        n_before = int((train_raw >= sentinel_thr).sum())
         train_raw = fill_sentinel(train_raw, threshold=sentinel_thr)
-        n_after = int((train_raw >= sentinel_thr).sum())
-        if n_before:
-            print(f"[data] {cfg.data.entity}: forward-filled {n_before} sentinel "
-                  f"values in train_raw (≥ {sentinel_thr:g})")
 
     n_val = int(n_train_all * cfg.data.val_ratio)
     train_part = train_raw[: n_train_all - n_val]
@@ -149,11 +184,43 @@ def build_smd_datasets(cfg) -> Tuple[SlidingWindow, SlidingWindow, SlidingWindow
     scaler = RobustScaler(clip_pad=clip_pad).fit(train_part)
     train_norm = scaler.transform(train_part)
     val_norm = scaler.transform(val_part)
-    test_norm = scaler.transform(test_raw)  # test 不做 sentinel 填充
+    test_norm = scaler.transform(test_raw)
+    return train_norm, val_norm, test_norm, scaler
 
+
+def build_smd_datasets(cfg):
+    """返回 (train_ds, val_ds, test_ds, test_label, scaler)。
+    val 从训练集尾部切，避免泄露未来；scaler 仅在训练数据上拟合。
+    """
+    entities = get_entities(cfg)
     val_stride = getattr(cfg.data, "val_stride", cfg.data.window)
-    train_ds = SlidingWindow(train_norm, cfg.data.window, cfg.data.train_stride)
-    val_ds = SlidingWindow(val_norm, cfg.data.window, val_stride)
-    test_ds = SlidingWindow(test_norm, cfg.data.window, cfg.data.test_stride)
 
-    return train_ds, val_ds, test_ds, label, scaler
+    if len(entities) == 1:
+        train_raw, test_raw, label = load_smd_entity(cfg.data.root, entities[0])
+        train_norm, val_norm, test_norm, scaler = _normalize_entity(train_raw, test_raw, cfg)
+        train_ds = SlidingWindow(train_norm, cfg.data.window, cfg.data.train_stride)
+        val_ds = SlidingWindow(val_norm, cfg.data.window, val_stride)
+        test_ds = SlidingWindow(test_norm, cfg.data.window, cfg.data.test_stride)
+        return train_ds, val_ds, test_ds, label, scaler
+
+    concat_mode = getattr(cfg.data, "concat_mode", "per_entity_scale")
+    if concat_mode != "per_entity_scale":
+        raise ValueError(f"Unsupported data.concat_mode: {concat_mode}")
+
+    train_series, val_series, test_series = [], [], []
+    labels = []
+    scalers: Dict[str, RobustScaler] = {}
+    for ent in entities:
+        train_raw, test_raw, label = load_smd_entity(cfg.data.root, ent)
+        train_norm, val_norm, test_norm, scaler = _normalize_entity(train_raw, test_raw, cfg)
+        train_series.append(train_norm)
+        val_series.append(val_norm)
+        test_series.append(test_norm)
+        labels.append(np.asarray(label, dtype=np.int64))
+        scalers[ent] = scaler
+
+    train_ds = MultiEntitySlidingWindow(train_series, entities, cfg.data.window, cfg.data.train_stride)
+    val_ds = MultiEntitySlidingWindow(val_series, entities, cfg.data.window, val_stride)
+    test_ds = MultiEntitySlidingWindow(test_series, entities, cfg.data.window, cfg.data.test_stride)
+    test_label = np.concatenate(labels, axis=0)
+    return train_ds, val_ds, test_ds, test_label, scalers

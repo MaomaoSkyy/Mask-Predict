@@ -26,7 +26,22 @@ data/SMD/
 bash scripts/train_ddp.sh configs/smd.yaml machine-1-1
 ```
 
+### 3.1 拼接多实体统一训练（可选）
+```bash
+python scripts/train.py --config configs/smd.yaml \
+  --entities machine-1-1 machine-1-2 machine-1-3
+```
+说明：多实体模式会先对每台机器各自做归一化，再拼接窗口训练，输出目录为
+`runs/concat_<N>_<hash>/`，避免覆盖单实体实验。
+
 ### 4. 评估
 ```bash
 python scripts/eval.py --config configs/smd.yaml --entity machine-1-1 --ckpt runs/machine-1-1/best.pt
+```
+
+多实体统一评估：
+```bash
+python scripts/eval.py --config configs/smd.yaml \
+  --entities machine-1-1 machine-1-2 machine-1-3 \
+  --ckpt runs/concat_3_<hash>/best.pt
 ```
