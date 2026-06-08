@@ -4,6 +4,9 @@ seed: 42
 data:
   root: /home/nick/projects/new/data/SMD
   entity: machine-1-1        # 默认 entity，可由命令行覆盖
+  entities: []               # 多实体拼接训练/评估；为空时走单实体 entity
+  concat_mode: per_entity_scale  # per_entity_scale: 每台单独归一化后再拼接
+  balance_sampling: false    # 多实体训练时是否均衡采样（仅单进程模式生效）
   n_features: 38
   window: 100
   train_stride: 1

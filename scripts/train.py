@@ -46,13 +46,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--entity", default=None, help="覆盖 config 中的 data.entity")
+    parser.add_argument("--entities", nargs="+", default=None, help="多实体拼接训练，优先级高于 --entity")
     parser.add_argument("--set", dest="overrides", action="append", default=[],
                         metavar="KEY=VALUE",
                         help="覆盖任意配置项，点号路径，可多次。如 --set train.epochs=40")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    if args.entity:
+    if args.entities:
+        cfg.data.entities = list(args.entities)
+        cfg._raw.setdefault("data", {})["entities"] = list(args.entities)
+    elif args.entity:
         cfg.data.entity = args.entity
     for ov in args.overrides:
         _apply_override(cfg, ov)

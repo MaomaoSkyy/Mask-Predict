@@ -11,7 +11,7 @@ torch.backends.cudnn.enabled = False  # 与 train.py 一致：规避 depthwise c
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.data.smd_dataset import build_smd_datasets  # noqa: E402
+from src.data.smd_dataset import build_smd_datasets, entity_group_name, get_entities  # noqa: E402
 from src.evaluation.metrics import evaluate_scores  # noqa: E402
 from src.inference.pot import pot_threshold  # noqa: E402
 from src.inference.scorer import score_series  # noqa: E402
@@ -44,17 +44,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--entity", default=None)
+    parser.add_argument("--entities", nargs="+", default=None, help="多实体拼接评估，优先级高于 --entity")
     parser.add_argument("--ckpt", required=True)
     parser.add_argument("--set", dest="overrides", action="append", default=[],
                         metavar="KEY=VALUE", help="覆盖配置，如 --set model.encoder=dualaxis")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    if args.entity:
+    if args.entities:
+        cfg.data.entities = list(args.entities)
+        cfg._raw.setdefault("data", {})["entities"] = list(args.entities)
+    elif args.entity:
         cfg.data.entity = args.entity
     for ov in args.overrides:
         _apply_override(cfg, ov)
 
+    entities = get_entities(cfg)
+    run_name = entity_group_name(entities)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _, val_ds, test_ds, test_label, _ = build_smd_datasets(cfg)
 
@@ -62,12 +68,13 @@ def main():
     sd = torch.load(args.ckpt, map_location=device)
     model.load_state_dict(sd["model"])
 
-    print(f"[eval] entity={cfg.data.entity}  val_windows={len(val_ds)}  test_windows={len(test_ds)}")
+    ent_disp = entities[0] if len(entities) == 1 else f"{len(entities)} entities"
+    print(f"[eval] entity={ent_disp}  val_windows={len(val_ds)}  test_windows={len(test_ds)}")
 
     val_out = score_series(model, val_ds, cfg, device)
     test_out = score_series(model, test_ds, cfg, device)
 
-    out_dir = Path(cfg.train.save_dir) / cfg.data.entity
+    out_dir = Path(cfg.train.save_dir) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if isinstance(val_out, dict):
@@ -97,6 +104,8 @@ def main():
     with open(out_dir / "eval.txt", "w", encoding="utf-8") as f:
         for k, v in result.items():
             f.write(f"{k}: {v}\n")
+    if len(entities) > 1:
+        np.save(out_dir / "test_labels.npy", np.asarray(test_label, dtype=np.int64))
     print(f"[eval] saved to {out_dir}")
 
 
