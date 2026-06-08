@@ -1,0 +1,64 @@
+# 门控消融 —— GATE 臂（源侧变量门 开）
+# 派生自 configs/smd.yaml；与 smd_abl_nogate.yaml 唯一的差别是 model.var_gate，
+# 训练预算（epochs/warmup）两臂一致，seed 一致 → 唯一受控变量是门本身。
+seed: 42
+
+data:
+  root: /home/nick/projects/new/data/SMD
+  entity: machine-1-1
+  n_features: 38
+  window: 100
+  train_stride: 1
+  val_stride: 20
+  test_stride: 100
+  val_ratio: 0.2
+  clip_pad: 4
+  sentinel_threshold: 1.0e6
+
+mask:
+  ratio: 0.15
+  span_prob: 0.667
+  span_min: 2
+  span_max: 8
+  var_mask_prob: 1
+  var_k_min: 1
+  var_k_max: 3
+  var_time_span: 0
+
+model:
+  d_model: 256
+  n_heads: 4
+  n_layers: 4
+  d_ff: 512
+  dropout: 0.1
+  attn_mode: alternate
+  local_conv_kernel: 5
+  var_gate: true             # ← 本臂：门开
+  var_gate_init: 2.0
+
+train:
+  batch_size: 128
+  num_workers: 4
+  epochs: 5                 # 长训：门需要时间分化（满 L1 后留 ~34 epoch）
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+  warmup_steps: 200          # 修正原 500>总步数 的 bug；~2.3 epoch warmup 后 cosine 衰减
+  grad_clip: 1.0
+  amp: true
+  log_every: 50
+  save_dir: runs_abl/gate    # ← 本臂独立目录，两臂分数/ckpt 不互相覆盖
+  gate_l1_weight: 0.02       # 偏弱可能全开、偏强可能全关——这是要 sweep 的主旋钮
+  gate_l1_hold_steps: 0      # L1 从头就上：hold 会给重建一个无约束窗口把门推到饱和全开
+  gate_l1_ramp_steps: 200    # 仍从 0 平滑升满，避免初期冲击
+  gate_lr: 0.005
+  gate_logit_clip: 4.0       # 门 logit 投影到 [-4,4] → gate∈[0.018,0.982]，防 sigmoid 饱和冻结
+
+inference:
+  mode: variable_rotation
+  mask_strides: 8
+  score_reduce: mean
+  score_combine: mean
+
+pot:
+  q: 0.99
+  level: 1.0e-4

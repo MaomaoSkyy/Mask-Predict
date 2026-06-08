@@ -1,0 +1,62 @@
+# SMD 训练配置
+seed: 42
+
+data:
+  root: /home/nick/projects/new/data/SMD
+  entity: machine-1-1        # 默认 entity，可由命令行覆盖
+  n_features: 38
+  window: 100
+  train_stride: 1
+  val_stride: 20             # 验证集滑窗 stride，越小 POT 拟合越稳
+  test_stride: 100           # 测试无重叠
+  val_ratio: 0.2           # 从训练集尾部切验证
+  clip_pad: 4              # RobustScaler 归一化后 clip 到 [-clip_pad, 1+clip_pad]
+  sentinel_threshold: 1.0e6  # train_raw 中 ≥ 此值视为 sentinel/缺失，前向填充；0=关闭。test 不处理
+
+mask:
+  ratio: 0.15                # 时间维 mask 总比例
+  span_prob: 0.667           # 在被选位置中，span mask 占比
+  span_min: 2
+  span_max: 8
+  # 变量维 mask（强迫从其他变量推断被 mask 的那几列；适合 P=UI 这类强耦合数据）
+  var_mask_prob: 0.5      # 变量维整列 mask 与时间维(cell)mask 各半；<1 模型才学过时间 mask（time 打分前提）
+  var_k_min: 1               # 每次 mask 的变量数下限
+  var_k_max: 3               # 上限
+  var_time_span: 0          # 0=整列 mask；>0=每个被选变量只 mask 一段长度，DDMT 风格更稳
+
+model:
+  d_model: 256
+  n_heads: 4
+  n_layers: 4                # 时间维与变量维各 n_layers/2 层交替
+  d_ff: 512
+  dropout: 0.1
+  attn_mode: alternate       # alternate | time_only | feature_only（仅 encoder=dualaxis 用）
+  local_conv_kernel: 21       # 0=关闭；>=3 启用 depthwise 1D conv（仅 dualaxis 用；staged 下被忽略）
+  encoder: staged            # staged（Stage1 因果TCN→Stage2 跨变量）| dualaxis（旧的交替注意力）
+  temporal_layers: 5         # staged Stage1 因果 TCN 层数（dilation 1,2,4,8,16）
+  temporal_kernel: 5         # staged Stage1 卷积核；k=5 配 5 层 → 因果感受野 ~125（>窗口100=全历史）
+  var_layers: 3              # staged Stage2 跨变量 attention 层数
+
+train:
+  batch_size: 128            # per-GPU
+  num_workers: 4
+  epochs: 20
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+  warmup_steps: 500
+  grad_clip: 1.0
+  amp: true
+  log_every: 50
+  save_dir: runs
+  early_stop_patience: 3     # val_loss 连续这么多 epoch 不改善则提前停；0=关闭
+  early_stop_min_delta: 0.0  # 改善需超过此绝对量才算（0=任何下降都算）
+
+inference:
+  mode:  variable_rotation             # time_checkerboard | variable_rotation | both
+  mask_strides: 8            # 棋盘 mask 的 stride 数（8 次前向覆盖全窗）
+  score_reduce: mean         # 多次前向同一点的分数聚合方式: mean | max
+  score_combine: mean        # mode=both 时两路分数融合: mean | max | sum（先 z-score 再合并）
+
+pot:
+  q: 0.99
+  level: 1.0e-4

@@ -1,0 +1,64 @@
+# 门控消融 —— NOGATE 臂（源侧变量门 关，基线）
+# 与 smd_abl_gate.yaml 逐字相同，唯一差别：model.var_gate=false。
+# var_gate=false 时模型不创建门，也不创建 v_absent（变量维 attention 退化为标准注意力），
+# gate_l1_weight / gate_lr 自动失效。参数差仅 ~550 个，可忽略 → 干净的门消融基线。
+seed: 42
+
+data:
+  root: /home/nick/projects/new/data/SMD
+  entity: machine-1-1
+  n_features: 38
+  window: 100
+  train_stride: 1
+  val_stride: 20
+  test_stride: 100
+  val_ratio: 0.2
+  clip_pad: 4
+  sentinel_threshold: 1.0e6
+
+mask:
+  ratio: 0.15
+  span_prob: 0.667
+  span_min: 2
+  span_max: 8
+  var_mask_prob: 1
+  var_k_min: 1
+  var_k_max: 3
+  var_time_span: 0
+
+model:
+  d_model: 256
+  n_heads: 4
+  n_layers: 4
+  d_ff: 512
+  dropout: 0.1
+  attn_mode: alternate
+  local_conv_kernel: 5
+  var_gate: false            # ← 本臂：门关（基线）
+  var_gate_init: 2.0
+
+train:
+  batch_size: 128
+  num_workers: 4
+  epochs: 40
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+  warmup_steps: 200
+  grad_clip: 1.0
+  amp: true
+  log_every: 50
+  save_dir: runs_abl/nogate  # ← 本臂独立目录
+  gate_l1_weight: 0.02       # var_gate=false 时被忽略
+  gate_l1_hold_steps: 200
+  gate_l1_ramp_steps: 300
+  gate_lr: 0.005
+
+inference:
+  mode: variable_rotation
+  mask_strides: 8
+  score_reduce: mean
+  score_combine: mean
+
+pot:
+  q: 0.99
+  level: 1.0e-4
